@@ -1,8 +1,9 @@
-use std::{time::SystemTime, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use futures::FutureExt;
 use tokio::sync::RwLock;
-use webdav_handler::fs::{DavFileSystem, DavFile, DavMetaData, FsError};
-use crate::db::File;
+use webdav_handler::fs::{DavFileSystem, DavFile, DavMetaData, FsError, FsResult};
+
+use crate::types::File;
 
 #[derive(Clone, Debug)]
 struct Cache (Arc<RwLock<HashMap<usize, Arc<RwLock<File>>>>>);
@@ -19,33 +20,22 @@ impl Cache {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Metadata {
-    len: u64,
-    modified: Option<SystemTime>,
-    is_dir: bool
-}
-impl DavMetaData for Metadata {
-    fn len(&self) -> u64 {
-        self.len
-    }
-    fn modified(&self) -> webdav_handler::fs::FsResult<SystemTime> {
-        self.modified.ok_or(FsError::GeneralFailure)
-    }
-    fn is_dir(&self) -> bool {
-        self.is_dir
-    }
-}
-
 #[derive(Debug)]
 pub struct DiscordFile {
     cached: Arc<RwLock<File>>
 }
+impl DiscordFile {
+    fn load(&self) {
+        self.cached
+    }
+}
 impl DavFile for DiscordFile {
     fn metadata<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
         async {
-            let file = self.cached.read()
-            Ok(Box::new(self.meta) as Box<dyn DavMetaData>)
+            match self.cached.read().await.metadata {
+                Some(m) => Ok(Box::new(m) as Box<(dyn DavMetaData + 'static)>),
+                None => Err(FsError::GeneralFailure)
+            }
         }.boxed()
     }
 }
@@ -59,5 +49,24 @@ impl DavFileSystem for DiscordFs {
         async {
 
         }.boxed()
+    }
+}
+
+struct DiscordClient {
+    token: String,
+    http: reqwest::Client
+}
+impl DiscordClient {
+    pub fn new(token: String) -> Self {
+        Self {
+            token,
+            http: reqwest::Client::new()
+        }
+    }
+    pub async fn get_message(&self, id: String) {
+        self.http.get("https://truc")
+            .header("User-Agent", "DiscordBot ($url, $versionNumber)")
+            .send()
+            .await;
     }
 }

@@ -1,6 +1,7 @@
 mod drives;
 mod db;
 mod error;
+mod types;
 
 use std::io;
 

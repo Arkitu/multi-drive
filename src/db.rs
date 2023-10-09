@@ -1,23 +1,6 @@
-use bytes::Bytes;
-use chrono::NaiveTime;
-use rusqlite::{OptionalExtension, types::FromSql};
+use rusqlite::OptionalExtension;
 use tokio_rusqlite::Connection;
-use crate::error::Result;
-
-#[derive(Debug, Clone)]
-pub struct Metadata {
-    len: u64,
-    modified: Option<NaiveTime>,
-    is_dir: bool
-}
-
-#[derive(Debug)]
-pub struct File {
-    path: String,
-    id: usize,
-    content: Option<Bytes>,
-    metadata: Option<Metadata>
-}
+use crate::{error::Result, types::{Metadata, File}};
 
 pub struct DB {
     pub conn: Connection,
