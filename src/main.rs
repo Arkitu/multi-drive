@@ -3,8 +3,8 @@ mod db;
 mod error;
 mod types;
 
-use std::io;
-
+use error::Result;
+use std::{io, env};
 use actix_web::{web, App, HttpServer};
 use webdav_handler::actix::*;
 use webdav_handler::{fakels::FakeLs, localfs::LocalFs, DavConfig, DavHandler};
@@ -18,11 +18,15 @@ pub async fn dav_handler(req: DavRequest, davhandler: web::Data<DavHandler>) -> 
     }
 }
 
-#[actix_web::main]
-async fn main() -> io::Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     env_logger::init();
+    dotenv::from_filename("config.env").unwrap();
+
     let addr = "127.0.0.1:4918";
     let dir = "/tmp";
+
+    drives::discord::DiscordClient::new(env::var("DISCORD_TOKEN").unwrap(), env::var("DISCORD_CHANNEL").unwrap()).get_message("1161354218779717843").await;
 
     let dav_server = DavHandler::builder()
         .filesystem(LocalFs::new(dir, false, false, false))
@@ -38,5 +42,6 @@ async fn main() -> io::Result<()> {
     })
     .bind(addr)?
     .run()
-    .await
+    .await?;
+    Ok(())
 }

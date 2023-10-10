@@ -19,3 +19,4 @@ rusqlite = { version = "0.29.0", features = ["chrono"] }
 tokio-rusqlite = "0.4.0"
 chrono = "0.4.31"
 reqwest = "0.11.22"
+dotenv = "0.15.0"
