@@ -5,7 +5,8 @@ pub enum Error {
     Io(std::io::Error),
     Serde(serde_json::Error),
     Env(std::env::VarError),
-    NotFound
+    NotFound,
+    BadContent
 }
 
 impl From<tokio_rusqlite::Error> for Error {

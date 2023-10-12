@@ -1,12 +1,10 @@
 use std::{collections::HashMap, sync::Arc, env};
 use bytes::Bytes;
-use futures::FutureExt;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 use webdav_handler::fs::{DavFileSystem, DavFile, DavMetaData, FsError, FsResult};
 use crate::error::{Result, Error};
-
-use crate::types::File;
+use crate::types::{File, Metadata};
 
 #[derive(Clone, Debug)]
 struct Cache (Arc<RwLock<HashMap<usize, Arc<RwLock<File>>>>>);
@@ -37,13 +35,22 @@ impl DiscordFile {
 
         let msg = self.client.get_message(&self.msg_id).await?;
 
-        if meta.is_dir() {
-            
-        }
-        let url = &msg.attachments.get(0).ok_or(Error::NotFound)?.url;
-        let content = self.client.get_attachment(url).await?;
+        let new_meta: Metadata = serde_json::from_str(&msg.content)?;
 
-        self.cached.write().await.content = Some(content);
+        if meta.is_dir() != new_meta.is_dir() {
+            eprintln!("Distant file is_dir value is different from local file is_dir value");
+            return Err(Error::BadContent)
+        }
+
+        if !meta.is_dir() {
+            self.cached.write().await.metadata = Some(new_meta);
+        } else {
+            let url = &msg.attachments.get(0).ok_or(Error::NotFound)?.url;
+            let content = self.client.get_attachment(url).await?;
+            let mut cached = self.cached.write().await;
+            cached.content = Some(content);
+            cached.metadata = Some(new_meta);
+        }
 
         Ok(())
     }
