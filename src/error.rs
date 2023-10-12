@@ -2,7 +2,10 @@
 pub enum Error {
     DB(tokio_rusqlite::Error),
     Reqwest(reqwest::Error),
-    Io(std::io::Error)
+    Io(std::io::Error),
+    Serde(serde_json::Error),
+    Env(std::env::VarError),
+    NotFound
 }
 
 impl From<tokio_rusqlite::Error> for Error {
@@ -26,6 +29,18 @@ impl From<reqwest::Error> for Error {
 impl From<std::io::Error> for Error {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Serde(value)
+    }
+}
+
+impl From<std::env::VarError> for Error {
+    fn from(value: std::env::VarError) -> Self {
+        Self::Env(value)
     }
 }
 

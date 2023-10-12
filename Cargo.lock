@@ -1097,6 +1097,8 @@ dependencies = [
  "pin-project",
  "reqwest",
  "rusqlite",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-rusqlite",
  "webdav-handler",

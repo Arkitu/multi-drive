@@ -2,8 +2,12 @@ mod drives;
 mod db;
 mod error;
 mod types;
-
 use error::Result;
+use drives::discord::DiscordFile;
+use types::File;
+
+use tokio::sync::RwLock;
+use std::sync::Arc;
 use std::{io, env};
 use actix_web::{web, App, HttpServer};
 use webdav_handler::actix::*;
@@ -26,7 +30,23 @@ async fn main() -> Result<()> {
     let addr = "127.0.0.1:4918";
     let dir = "/tmp";
 
-    drives::discord::DiscordClient::new(env::var("DISCORD_TOKEN").unwrap(), env::var("DISCORD_CHANNEL").unwrap()).get_message("1161354218779717843").await;
+    let d_client = drives::discord::DiscordClient::new(env::var("DISCORD_TOKEN")?, env::var("DISCORD_CHANNEL")?);
+    
+    let file = DiscordFile {
+        msg_id: "1161354218779717843".to_string(),
+        cached: Arc::new(RwLock::new(
+            File {
+                path: "lalala.txt".to_string(),
+                id: 0,
+                content: None,
+                metadata: None
+            }
+        )),
+        client: Arc::new(d_client)
+    };
+
+    file.load().await?;
+    //.get_message("1161354218779717843").await;
 
     let dav_server = DavHandler::builder()
         .filesystem(LocalFs::new(dir, false, false, false))
