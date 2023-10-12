@@ -1,14 +1,15 @@
-use std::{collections::HashMap, sync::Arc, env};
+use std::{collections::HashMap, sync::Arc};
 use bytes::Bytes;
-use serde::Deserialize;
+use reqwest::multipart;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use webdav_handler::fs::{DavFileSystem, DavFile, DavMetaData, FsError, FsResult};
+use webdav_handler::fs::DavMetaData;
 use crate::error::{Result, Error};
 use crate::types::{File, Metadata};
 
 #[derive(Clone, Debug)]
-struct Cache (Arc<RwLock<HashMap<usize, Arc<RwLock<File>>>>>);
-impl Cache {
+struct DiscordCache (Arc<RwLock<HashMap<usize, Arc<RwLock<File>>>>>);
+impl DiscordCache {
     pub fn new() -> Self {
         Self(Arc::new(RwLock::new(HashMap::new())))
     }
@@ -54,7 +55,16 @@ impl DiscordFile {
 
         Ok(())
     }
-    pub async fn save_edit(&self) -> Result<()> {
+    pub async fn send(&self) -> Result<()> {
+        let cached = self.cached.read().await;
+        let content = cached.content.clone().ok_or(Error::NotFound)?;
+        let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
+        let id = cached.id;
+        drop(cached);
+        
+        self.client.send_msg_with_attachment(&serde_json::to_string(&meta)?, [(id.to_string(), content)].to_vec()).await?;
+
+
         Ok(())
     }
 }
@@ -97,6 +107,24 @@ pub struct MsgJson {
     attachments: Vec<MsgAttachmentJson>
 }
 
+#[derive(Serialize)]
+pub struct SendAttachmentJson<'a> {
+    pub id: usize,
+    pub description: &'a str,
+    pub filename: &'a str
+}
+
+#[derive(Serialize)]
+pub struct SendMsgReqJson<'a> {
+    pub content: &'a str,
+    pub attachments: Vec<SendAttachmentJson<'a>>
+}
+
+#[derive(Deserialize)]
+pub struct SendMsgResJson {
+    pub id: String
+}
+
 #[derive(Debug)]
 pub struct DiscordClient {
     token: String,
@@ -126,5 +154,36 @@ impl DiscordClient {
     }
     pub async fn get_attachment(&self, url: &str) -> Result<Bytes> {
         Ok(self.http.get(url).send().await?.bytes().await?)
+    }
+    pub async fn send_msg_with_attachment(&self, content: &str, attachment: Vec<(String, Bytes)>) -> Result<usize> {
+        let mut form = multipart::Form::new()
+            .part("payload_json", multipart::Part::text(serde_json::to_string(&SendMsgReqJson {
+                content,
+                attachments: attachment.iter().enumerate().map(|(i, (n, _))| SendAttachmentJson {
+                    id: i,
+                    description: "",
+                    filename: n
+                }).collect()
+            })?));
+        
+        for (i, (n, a)) in attachment.into_iter().enumerate() {
+            form = form.part(format!("files[{}]", i), multipart::Part::bytes(a.to_vec()).file_name(n))
+        }
+
+        let res = self.http.post(format!("https://discord.com/api/v10/channels/{}/messages", self.channel_id,))
+            .header("User-Agent", "DiscordBot (https://github.com/Arkitu/multi-drive, 0.0.1)")
+            .header("Authorization", "Bot ".to_string() + &self.token)
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            return Err(Error::DiscordError)
+        }
+
+        let res = res.text().await?;
+        let res: SendMsgResJson = serde_json::from_str(&res)?;
+
+        Ok(res.id.parse()?)
     }
 }

@@ -2,13 +2,14 @@ mod drives;
 mod db;
 mod error;
 mod types;
+use bytes::Bytes;
 use error::Result;
 use drives::discord::DiscordFile;
 use types::File;
 
 use tokio::sync::RwLock;
 use std::sync::Arc;
-use std::{io, env};
+use std::env;
 use actix_web::{web, App, HttpServer};
 use webdav_handler::actix::*;
 use webdav_handler::{fakels::FakeLs, localfs::LocalFs, DavConfig, DavHandler};
@@ -32,6 +33,8 @@ async fn main() -> Result<()> {
 
     let d_client = drives::discord::DiscordClient::new(env::var("DISCORD_TOKEN")?, env::var("DISCORD_CHANNEL")?);
     
+    d_client.send_msg_with_attachment("lalalal", [("fichier.txt".to_string(), Bytes::from_static(b"sqjdksvbxwcn"))].to_vec()).await?;
+
     let file = DiscordFile {
         msg_id: "1161354218779717843".to_string(),
         cached: Arc::new(RwLock::new(

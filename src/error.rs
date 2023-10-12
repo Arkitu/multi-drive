@@ -6,7 +6,8 @@ pub enum Error {
     Serde(serde_json::Error),
     Env(std::env::VarError),
     NotFound,
-    BadContent
+    BadContent,
+    DiscordError
 }
 
 impl From<tokio_rusqlite::Error> for Error {
