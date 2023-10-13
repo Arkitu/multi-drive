@@ -24,7 +24,7 @@ impl DiscordCache {
 
 #[derive(Debug)]
 pub struct DiscordFile {
-    pub msg_id: String,
+    pub msg_id: Option<String>,
     pub cached: Arc<RwLock<File>>,
     pub client: Arc<DiscordClient>
 }
@@ -34,7 +34,7 @@ impl DiscordFile {
         let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
         drop(cached);
 
-        let msg = self.client.get_message(&self.msg_id).await?;
+        let msg = self.client.get_message(self.msg_id.as_ref().ok_or(Error::NotFound)?).await?;
 
         let new_meta: Metadata = serde_json::from_str(&msg.content)?;
 
@@ -66,16 +66,20 @@ impl DiscordFile {
         Ok((serde_json::to_string(&meta)?, [(id.to_string(), content)].to_vec()))
     }
     /// Send the file to Discord for the first time
-    pub async fn send_create(&self) -> Result<()> {
+    pub async fn send_create(&mut self) -> Result<()> {
         let msg_data = self.get_msg_data().await?;
         
-        self.client.send_msg_with_attachment(&msg_data.0, msg_data.1).await?;
+        let msg_id = self.client.send_msg_with_attachment(&msg_data.0, msg_data.1).await?;
+
+        self.msg_id = Some(msg_id);
 
         Ok(())
     }
     /// Edit the file on Discord, return an error if the file was not sent
     pub async fn send_edit(&self) -> Result<()> {
         let msg_data = self.get_msg_data().await?;
+
+        self.client.edit_msg_with_attachments(self.msg_id.as_ref().ok_or(Error::NotFound)?, &msg_data.0, msg_data.1).await?;
 
         Ok(())
     }
@@ -109,8 +113,7 @@ pub struct MsgAttachmentJson {
     filename: String,
     size: usize,
     url: String,
-    proxy_url: String,
-    content_type: String
+    proxy_url: String
 }
 
 #[derive(Deserialize, Debug)]
@@ -167,7 +170,7 @@ impl DiscordClient {
     pub async fn get_attachment(&self, url: &str) -> Result<Bytes> {
         Ok(self.http.get(url).send().await?.bytes().await?)
     }
-    pub async fn send_msg_with_attachment(&self, content: &str, attachment: Vec<(String, Bytes)>) -> Result<usize> {
+    pub async fn send_msg_with_attachment(&self, content: &str, attachment: Vec<(String, Bytes)>) -> Result<String> {
         let mut form = multipart::Form::new()
             .part("payload_json", multipart::Part::text(serde_json::to_string(&SendMsgReqJson {
                 content,
@@ -182,7 +185,7 @@ impl DiscordClient {
             form = form.part(format!("files[{}]", i), multipart::Part::bytes(a.to_vec()).file_name(n))
         }
 
-        let res = self.http.post(format!("https://discord.com/api/v10/channels/{}/messages", self.channel_id,))
+        let res = self.http.post(format!("https://discord.com/api/v10/channels/{}/messages", self.channel_id))
             .header("User-Agent", "DiscordBot (https://github.com/Arkitu/multi-drive, 0.0.1)")
             .header("Authorization", "Bot ".to_string() + &self.token)
             .multipart(form)
@@ -196,6 +199,34 @@ impl DiscordClient {
         let res = res.text().await?;
         let res: SendMsgResJson = serde_json::from_str(&res)?;
 
-        Ok(res.id.parse::<usize>()?)
+        Ok(res.id)
+    }
+    pub async fn edit_msg_with_attachments(&self, msg_id: &str, content: &str, attachment: Vec<(String, Bytes)>) -> Result<()> {
+        let mut form = multipart::Form::new()
+            .part("payload_json", multipart::Part::text(serde_json::to_string(&SendMsgReqJson {
+                content,
+                attachments: attachment.iter().enumerate().map(|(i, (n, _))| SendAttachmentJson {
+                    id: i,
+                    description: "",
+                    filename: n
+                }).collect()
+            })?));
+        
+        for (i, (n, a)) in attachment.into_iter().enumerate() {
+            form = form.part(format!("files[{}]", i), multipart::Part::bytes(a.to_vec()).file_name(n))
+        }
+
+        let res = self.http.patch(format!("https://discord.com/api/v10/channels/{}/messages/{}", self.channel_id, msg_id))
+            .header("User-Agent", "DiscordBot (https://github.com/Arkitu/multi-drive, 0.0.1)")
+            .header("Authorization", "Bot ".to_string() + &self.token)
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !res.status().is_success() {
+            return Err(Error::DiscordError)
+        }
+
+        Ok(())
     }
 }

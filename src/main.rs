@@ -14,6 +14,8 @@ use actix_web::{web, App, HttpServer};
 use webdav_handler::actix::*;
 use webdav_handler::{fakels::FakeLs, localfs::LocalFs, DavConfig, DavHandler};
 
+use crate::types::Metadata;
+
 pub async fn dav_handler(req: DavRequest, davhandler: web::Data<DavHandler>) -> DavResponse {
     if let Some(prefix) = req.prefix() {
         let config = DavConfig::new().strip_prefix(prefix);
@@ -35,18 +37,30 @@ async fn main() -> Result<()> {
     
     d_client.send_msg_with_attachment("lalalal", [("fichier.txt".to_string(), Bytes::from_static(b"sqjdksvbxwcn"))].to_vec()).await?;
 
-    let file = DiscordFile {
-        msg_id: "1161354218779717843".to_string(),
+    let mut file = DiscordFile {
+        msg_id: None,
         cached: Arc::new(RwLock::new(
             File {
                 path: "lalala.txt".to_string(),
                 id: 0,
-                content: None,
-                metadata: None
+                content: Some(Bytes::from_static(b"avant")),
+                metadata: Some(Metadata {
+                    len: 5,
+                    modified: None,
+                    is_dir: false
+                })
             }
         )),
         client: Arc::new(d_client)
     };
+
+    file.send_create().await?;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+    file.cached.write().await.content = Some(Bytes::from_static(b"apres"));
+
+    file.send_edit().await?;
 
     file.load().await?;
     //.get_message("1161354218779717843").await;
