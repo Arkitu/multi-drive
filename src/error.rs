@@ -5,6 +5,7 @@ pub enum Error {
     Io(std::io::Error),
     Serde(serde_json::Error),
     Env(std::env::VarError),
+    Parsing(std::num::ParseIntError),
     NotFound,
     BadContent,
     DiscordError
@@ -43,6 +44,12 @@ impl From<serde_json::Error> for Error {
 impl From<std::env::VarError> for Error {
     fn from(value: std::env::VarError) -> Self {
         Self::Env(value)
+    }
+}
+
+impl From<std::num::ParseIntError> for Error {
+    fn from(value: std::num::ParseIntError) -> Self {
+        Self::Parsing(value)
     }
 }
 

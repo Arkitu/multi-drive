@@ -55,15 +55,27 @@ impl DiscordFile {
 
         Ok(())
     }
-    pub async fn send(&self) -> Result<()> {
+    /// Generate the message to send to Discord from the local file
+    pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Bytes)>)> {
         let cached = self.cached.read().await;
         let content = cached.content.clone().ok_or(Error::NotFound)?;
         let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
         let id = cached.id;
         drop(cached);
-        
-        self.client.send_msg_with_attachment(&serde_json::to_string(&meta)?, [(id.to_string(), content)].to_vec()).await?;
 
+        Ok((serde_json::to_string(&meta)?, [(id.to_string(), content)].to_vec()))
+    }
+    /// Send the file to Discord for the first time
+    pub async fn send_create(&self) -> Result<()> {
+        let msg_data = self.get_msg_data().await?;
+        
+        self.client.send_msg_with_attachment(&msg_data.0, msg_data.1).await?;
+
+        Ok(())
+    }
+    /// Edit the file on Discord, return an error if the file was not sent
+    pub async fn send_edit(&self) -> Result<()> {
+        let msg_data = self.get_msg_data().await?;
 
         Ok(())
     }
@@ -184,6 +196,6 @@ impl DiscordClient {
         let res = res.text().await?;
         let res: SendMsgResJson = serde_json::from_str(&res)?;
 
-        Ok(res.id.parse()?)
+        Ok(res.id.parse::<usize>()?)
     }
 }
