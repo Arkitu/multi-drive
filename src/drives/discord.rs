@@ -1,9 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
-use bytes::Bytes;
+use std::{collections::HashMap, sync::Arc, io::{Write, Read}};
+use bytes::{Bytes, BufMut, BytesMut};
+use futures::{FutureExt, io::Cursor};
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use webdav_handler::fs::DavMetaData;
+use webdav_handler::fs::{DavMetaData, DavFileSystem, FsError, DavFile};
 use crate::error::{Result, Error};
 use crate::types::{File, Metadata};
 
@@ -56,7 +57,7 @@ impl DiscordFile {
         Ok(())
     }
     /// Generate the message to send to Discord from the local file
-    pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Bytes)>)> {
+    pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Cursor<BytesMut>)>)> {
         let cached = self.cached.read().await;
         let content = cached.content.clone().ok_or(Error::NotFound)?;
         let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
@@ -67,9 +68,9 @@ impl DiscordFile {
     }
     /// Send the file to Discord for the first time
     pub async fn send_create(&mut self) -> Result<()> {
-        let msg_data = self.get_msg_data().await?;
+        let (content, attachments) = self.get_msg_data().await?;
         
-        let msg_id = self.client.send_msg_with_attachment(&msg_data.0, msg_data.1).await?;
+        let msg_id = self.client.send_msg_with_attachment(&content, attachments).await?;
 
         self.msg_id = Some(msg_id);
 
@@ -83,29 +84,62 @@ impl DiscordFile {
 
         Ok(())
     }
+    // Create or edit distant file
+    pub async fn send(&mut self) -> Result<()> {
+        match self.msg_id {
+            Some(_) => self.send_edit().await,
+            None => self.send_create().await
+        }
+    }
 }
-// impl DavFile for DiscordFile {
-//     fn metadata<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
-//         async {
-//             match self.cached.read().await.metadata {
-//                 Some(m) => Ok(Box::new(m) as Box<(dyn DavMetaData + 'static)>),
-//                 None => Err(FsError::GeneralFailure)
-//             }
-//         }.boxed()
-//     }
-// }
 
-// #[derive(Clone)]
-// pub struct DiscordFs {
-//     cache: Cache
-// }
-// impl DavFileSystem for DiscordFs {
-//     fn open<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath, options: webdav_handler::fs::OpenOptions) -> webdav_handler::fs::FsFuture<Box<dyn webdav_handler::fs::DavFile>> {
-//         async {
+impl DavFile for DiscordFile {
+    fn metadata<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
+        async {
+            match self.cached.read().await.metadata {
+                Some(m) => Ok(Box::new(m) as Box<(dyn DavMetaData + 'static)>),
+                None => Err(FsError::GeneralFailure)
+            }
+        }.boxed()
+    }
+    fn write_bytes<'a>(&'a mut self, buf: bytes::Bytes) -> webdav_handler::fs::FsFuture<()> {
+        async move {
+            self.load().await?;
+            let mut cached = self.cached.write().await;
+            cached.content.unwrap().put(buf);
+            self.send_edit().await?;
+            Ok(())
+        }.boxed()
+    }
+    fn write_buf<'a>(&'a mut self, buf: Box<dyn bytes::Buf + Send>) -> webdav_handler::fs::FsFuture<()> {
+        async move {
+            self.load().await?;
+            let mut cached = self.cached.write().await;
+            cached.content.unwrap().put(buf);
+            self.send_edit().await?;
+            Ok(())
+        }.boxed()
+    }
+    fn read_bytes<'a>(&'a mut self, count: usize) -> webdav_handler::fs::FsFuture<bytes::Bytes> {
+        async move {
+            self.load().await?;
+            let content: Bytes = self.cached.read().await.content.unwrap().into();
+            Ok(content)
+        }.boxed()
+    }
+}
 
-//         }.boxed()
-//     }
-// }
+#[derive(Clone)]
+pub struct DiscordFs {
+    cache: DiscordCache
+}
+impl DavFileSystem for DiscordFs {
+    fn open<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath, options: webdav_handler::fs::OpenOptions) -> webdav_handler::fs::FsFuture<Box<dyn webdav_handler::fs::DavFile>> {
+        async {
+
+        }.boxed()
+    }
+}
 
 #[derive(Deserialize, Debug)]
 pub struct MsgAttachmentJson {
@@ -170,7 +204,7 @@ impl DiscordClient {
     pub async fn get_attachment(&self, url: &str) -> Result<Bytes> {
         Ok(self.http.get(url).send().await?.bytes().await?)
     }
-    pub async fn send_msg_with_attachment(&self, content: &str, attachment: Vec<(String, Bytes)>) -> Result<String> {
+    pub async fn send_msg_with_attachment(&self, content: &str, attachment: Vec<(String, &BytesMut)>) -> Result<String> {
         let mut form = multipart::Form::new()
             .part("payload_json", multipart::Part::text(serde_json::to_string(&SendMsgReqJson {
                 content,
@@ -201,7 +235,7 @@ impl DiscordClient {
 
         Ok(res.id)
     }
-    pub async fn edit_msg_with_attachments(&self, msg_id: &str, content: &str, attachment: Vec<(String, Bytes)>) -> Result<()> {
+    pub async fn edit_msg_with_attachments(&self, msg_id: &str, content: &str, attachment: Vec<(String, &Bytes)>) -> Result<()> {
         let mut form = multipart::Form::new()
             .part("payload_json", multipart::Part::text(serde_json::to_string(&SendMsgReqJson {
                 content,

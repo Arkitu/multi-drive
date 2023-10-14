@@ -1,6 +1,7 @@
 use std::time::SystemTime;
-use bytes::Bytes;
+use bytes::BytesMut;
 use chrono::{DateTime, Utc};
+use futures::io::Cursor;
 use serde::{Deserialize, Serialize};
 use webdav_handler::fs::{DavMetaData, FsError};
 
@@ -30,6 +31,6 @@ impl DavMetaData for Metadata {
 pub struct File {
     pub path: String,
     pub id: usize,
-    pub content: Option<Bytes>,
+    pub content: Option<Cursor<BytesMut>>,
     pub metadata: Option<Metadata>
 }

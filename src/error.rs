@@ -53,4 +53,10 @@ impl From<std::num::ParseIntError> for Error {
     }
 }
 
+impl From<Error> for webdav_handler::fs::FsError {
+    fn from(value: Error) -> Self {
+        webdav_handler::fs::FsError::GeneralFailure
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
