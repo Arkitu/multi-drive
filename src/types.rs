@@ -1,5 +1,4 @@
 use std::time::SystemTime;
-use bytes::BytesMut;
 use chrono::{DateTime, Utc};
 use futures::io::Cursor;
 use serde::{Deserialize, Serialize};
@@ -10,6 +9,11 @@ pub struct Metadata {
     pub len: u64,
     pub modified: Option<DateTime<Utc>>,
     pub is_dir: bool
+}
+impl Metadata {
+    pub fn boxed(self) -> Box<Self> {
+        Box::new(self)
+    }
 }
 
 impl DavMetaData for Metadata {
@@ -31,6 +35,28 @@ impl DavMetaData for Metadata {
 pub struct File {
     pub path: String,
     pub id: usize,
+    /// Set this with the set_content method
     pub content: Option<Cursor<Vec<u8>>>,
+    /// This is used to store the cursor position when content is not loaded. This is not accurate the rest of the time
+    pub cursor_pos: u64,
     pub metadata: Option<Metadata>
+}
+impl File {
+    pub fn set_content(&mut self, new: Option<Vec<u8>>) {
+        match new {
+            Some(n) => {
+                let pos = match self.content {
+                    Some(o) => o.position(),
+                    None => self.cursor_pos
+                };
+                let mut cursor = Cursor::new(n);
+                cursor.set_position(self.cursor_pos);
+                self.content = Some(cursor);
+            }
+            None => if let Some(o) = self.content {
+                self.cursor_pos = o.position();
+                self.content = None;
+            }
+        }
+    }
 }

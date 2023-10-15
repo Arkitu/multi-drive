@@ -20,7 +20,6 @@ impl DB {
             conn.execute("
                 CREATE TABLE IF NOT EXISTS files (
                     id INTEGER PRIMARY KEY,
-                    path TEXT NOT NULL,
                     meta_len INTEGER NOT NULL,
                     meta_modified TEXT,
                     meta_is_dir BOOLEAN NOT NULL

@@ -1,21 +1,20 @@
 use std::{collections::HashMap, sync::Arc, borrow::Cow};
-use futures::{FutureExt, AsyncWriteExt, AsyncReadExt};
-use futures::io::Cursor;
+use futures::{FutureExt, AsyncWriteExt, AsyncReadExt, AsyncSeekExt};
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 use webdav_handler::fs::{DavMetaData, DavFileSystem, FsError, DavFile};
-use crate::error::{Result, Error, StringResult};
+use crate::error::{Result, Error};
 use crate::types::{File, Metadata};
-use std::io::Write;
+use bytes::Buf;
 
 #[derive(Clone, Debug)]
-struct DiscordCache (Arc<RwLock<HashMap<usize, Arc<RwLock<File>>>>>);
+struct DiscordCache (Arc<RwLock<HashMap<u64, Arc<RwLock<File>>>>>);
 impl DiscordCache {
     pub fn new() -> Self {
         Self(Arc::new(RwLock::new(HashMap::new())))
     }
-    pub async fn get(&self, discord_id: &usize) -> Option<Arc<RwLock<File>>> {
+    pub async fn get(&self, discord_id: &u64) -> Option<Arc<RwLock<File>>> {
         if let Some(f) = self.0.read().await.get(discord_id) {
             Some(f.clone())
         } else {
@@ -28,10 +27,26 @@ impl DiscordCache {
 pub struct DiscordFile {
     pub msg_id: Option<String>,
     pub cached: Arc<RwLock<File>>,
-    pub client: Arc<DiscordClient>
+    pub client: Arc<DiscordClient>,
+    /// Lock when you are sure that the file is loaded. This way the file is not loaded multiple time
+    pub loaded: Arc<Mutex<()>>
 }
 impl DiscordFile {
+    pub fn new(msg_id: Option<String>, cached: Arc<RwLock<File>>, client: Arc<DiscordClient>) -> Self {
+        Self {
+            msg_id,
+            cached,
+            client,
+            loaded: Arc::new(Mutex::new(()))
+        }
+    }
+    pub fn boxed(self) -> Box<Self> {
+        Box::new(self)
+    }
     pub async fn load(&self) -> Result<()> {
+        if let Err(_) = self.loaded.try_lock() {
+            return Ok(())
+        }
         let cached = self.cached.read().await;
         let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
         drop(cached);
@@ -51,7 +66,7 @@ impl DiscordFile {
             let url = &msg.attachments.get(0).ok_or(Error::NotFound)?.url;
             let content = self.client.get_attachment(url).await?;
             let mut cached = self.cached.write().await;
-            cached.content = Some(Cursor::new(content));
+            cached.set_content(Some(content));
             cached.metadata = Some(new_meta);
         }
 
@@ -106,9 +121,9 @@ impl DavFile for DiscordFile {
     fn write_bytes<'a>(&'a mut self, buf: bytes::Bytes) -> webdav_handler::fs::FsFuture<()> {
         async move {
             self.load().await?;
+            let loaded_lock = self.loaded.lock().await;
             let mut cached = self.cached.write().await;
             let content = cached.content.unwrap();
-            tokio::time::sleep(tokio::time::Duration::from_micros(30)).await;
             content.write_all(&buf[..]).await;
             self.send_edit().await?;
             Ok(())
@@ -117,8 +132,14 @@ impl DavFile for DiscordFile {
     fn write_buf<'a>(&'a mut self, buf: Box<dyn bytes::Buf + Send>) -> webdav_handler::fs::FsFuture<()> {
         async move {
             self.load().await?;
+            let loaded_lock = self.loaded.lock().await;
             let mut cached = self.cached.write().await;
-            cached.content.unwrap().put(buf);
+            let content = cached.content.unwrap();
+            while buf.has_remaining() {
+                let chunk = buf.chunk();
+                let n = content.write(chunk).await?;
+                buf.advance(n);
+            }
             self.send_edit().await?;
             Ok(())
         }.boxed()
@@ -132,6 +153,23 @@ impl DavFile for DiscordFile {
             Ok(buf.into())
         }.boxed()
     }
+    fn seek<'a>(&'a mut self, pos: std::io::SeekFrom) -> webdav_handler::fs::FsFuture<u64> {
+        async move {
+            self.load().await?;
+            let content = self.cached.read().await.content.unwrap();
+            let res = content.seek(pos).await?;
+            Ok(res)
+        }.boxed()
+    }
+    fn flush<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<()> {
+        async move {
+            let cached = self.cached.read().await;
+            if let Some(c) = cached.content {
+                c.flush().await?;
+            }
+            Ok(())
+        }.boxed()
+    }
 }
 
 #[derive(Clone)]
@@ -139,9 +177,10 @@ pub struct DiscordFs {
     cache: DiscordCache
 }
 impl DavFileSystem for DiscordFs {
-    fn open<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath, options: webdav_handler::fs::OpenOptions) -> webdav_handler::fs::FsFuture<Box<dyn webdav_handler::fs::DavFile>> {
-        async {
+    fn metadata<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
+        async move {
 
+            Ok()
         }.boxed()
     }
 }
@@ -241,7 +280,8 @@ impl DiscordClient {
 
         Ok(res.id)
     }
-    pub async fn edit_msg_with_attachments(&self, msg_id: &str, content: &str, attachment: Vec<(String, &Bytes)>) -> Result<()> {
+    pub async fn edit_msg_with_attachments<T>(&self, msg_id: &str, content: &str, attachment: Vec<(String, T)>) -> Result<()>
+    where T: Into<Cow<'static, [u8]>> {
         let mut form = multipart::Form::new()
             .part("payload_json", multipart::Part::text(serde_json::to_string(&SendMsgReqJson {
                 content,
@@ -253,7 +293,7 @@ impl DiscordClient {
             })?));
         
         for (i, (n, a)) in attachment.into_iter().enumerate() {
-            form = form.part(format!("files[{}]", i), multipart::Part::bytes(a.to_vec()).file_name(n))
+            form = form.part(format!("files[{}]", i), multipart::Part::bytes(a).file_name(n))
         }
 
         let res = self.http.patch(format!("https://discord.com/api/v10/channels/{}/messages/{}", self.channel_id, msg_id))

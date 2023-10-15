@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 #[derive(Debug)]
 pub enum Error {
     DB(tokio_rusqlite::Error),
@@ -10,6 +12,23 @@ pub enum Error {
     BadContent,
     DiscordError,
     String(StringError)
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+       match self {
+           Self::DB(e) => write!(f, "Database error: {}", e),
+           Self::Reqwest(e) => write!(f, "Reqwest error: {}", e),
+           Self::Io(e) => write!(f, "IO error: {}", e),
+           Self::Serde(e) => write!(f, "Serde error: {}", e),
+           Self::Env(e) => write!(f, "Env error: {}", e),
+           Self::Parsing(e) => write!(f, "Parsing error: {}", e),
+           Self::NotFound => write!(f, "Not found"),
+           Self::BadContent => write!(f, "Bad content"),
+           Self::DiscordError => write!(f, "Discord error"),
+           Self::String(e) => write!(f, "String error: {}", e.0)
+       }
+    }
 }
 
 impl From<tokio_rusqlite::Error> for Error {
@@ -66,6 +85,8 @@ impl From<StringError> for Error {
     }
 }
 
+
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
@@ -78,7 +99,7 @@ impl<T: ToString> From<T> for StringError {
 }
 
 impl From<StringError> for webdav_handler::fs::FsError {
-    fn from(value: Error) -> Self {
+    fn from(value: StringError) -> Self {
         webdav_handler::fs::FsError::GeneralFailure
     }
 }
