@@ -1,12 +1,13 @@
-use std::{collections::HashMap, sync::Arc, io::{Write, Read}};
-use bytes::{Bytes, BufMut, BytesMut};
-use futures::{FutureExt, io::Cursor};
+use std::{collections::HashMap, sync::Arc, borrow::Cow};
+use futures::{FutureExt, AsyncWriteExt, AsyncReadExt};
+use futures::io::Cursor;
 use reqwest::multipart;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use webdav_handler::fs::{DavMetaData, DavFileSystem, FsError, DavFile};
-use crate::error::{Result, Error};
+use crate::error::{Result, Error, StringResult};
 use crate::types::{File, Metadata};
+use std::io::Write;
 
 #[derive(Clone, Debug)]
 struct DiscordCache (Arc<RwLock<HashMap<usize, Arc<RwLock<File>>>>>);
@@ -50,16 +51,16 @@ impl DiscordFile {
             let url = &msg.attachments.get(0).ok_or(Error::NotFound)?.url;
             let content = self.client.get_attachment(url).await?;
             let mut cached = self.cached.write().await;
-            cached.content = Some(content);
+            cached.content = Some(Cursor::new(content));
             cached.metadata = Some(new_meta);
         }
 
         Ok(())
     }
     /// Generate the message to send to Discord from the local file
-    pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Cursor<BytesMut>)>)> {
+    pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Vec<u8>)>)> {
         let cached = self.cached.read().await;
-        let content = cached.content.clone().ok_or(Error::NotFound)?;
+        let content = cached.content.as_ref().ok_or(Error::NotFound)?.get_ref().to_owned();
         let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
         let id = cached.id;
         drop(cached);
@@ -106,7 +107,9 @@ impl DavFile for DiscordFile {
         async move {
             self.load().await?;
             let mut cached = self.cached.write().await;
-            cached.content.unwrap().put(buf);
+            let content = cached.content.unwrap();
+            tokio::time::sleep(tokio::time::Duration::from_micros(30)).await;
+            content.write_all(&buf[..]).await;
             self.send_edit().await?;
             Ok(())
         }.boxed()
@@ -123,8 +126,10 @@ impl DavFile for DiscordFile {
     fn read_bytes<'a>(&'a mut self, count: usize) -> webdav_handler::fs::FsFuture<bytes::Bytes> {
         async move {
             self.load().await?;
-            let content: Bytes = self.cached.read().await.content.unwrap().into();
-            Ok(content)
+            let buf = Vec::with_capacity(count);
+            buf.fill(0);
+            let content = self.cached.read().await.content.unwrap().read_exact(&mut buf);
+            Ok(buf.into())
         }.boxed()
     }
 }
@@ -201,10 +206,11 @@ impl DiscordClient {
 
         Ok(res)
     }
-    pub async fn get_attachment(&self, url: &str) -> Result<Bytes> {
-        Ok(self.http.get(url).send().await?.bytes().await?)
+    pub async fn get_attachment(&self, url: &str) -> Result<Vec<u8>> {
+        Ok(self.http.get(url).send().await?.bytes().await?.to_vec())
     }
-    pub async fn send_msg_with_attachment(&self, content: &str, attachment: Vec<(String, &BytesMut)>) -> Result<String> {
+    pub async fn send_msg_with_attachment<T>(&self, content: &str, attachment: Vec<(String, T)>) -> Result<String>
+    where T: Into<Cow<'static, [u8]>> {
         let mut form = multipart::Form::new()
             .part("payload_json", multipart::Part::text(serde_json::to_string(&SendMsgReqJson {
                 content,
@@ -216,7 +222,7 @@ impl DiscordClient {
             })?));
         
         for (i, (n, a)) in attachment.into_iter().enumerate() {
-            form = form.part(format!("files[{}]", i), multipart::Part::bytes(a.to_vec()).file_name(n))
+            form = form.part(format!("files[{}]", i), multipart::Part::bytes(a).file_name(n))
         }
 
         let res = self.http.post(format!("https://discord.com/api/v10/channels/{}/messages", self.channel_id))

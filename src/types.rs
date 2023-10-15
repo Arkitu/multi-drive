@@ -31,6 +31,6 @@ impl DavMetaData for Metadata {
 pub struct File {
     pub path: String,
     pub id: usize,
-    pub content: Option<Cursor<BytesMut>>,
+    pub content: Option<Cursor<Vec<u8>>>,
     pub metadata: Option<Metadata>
 }

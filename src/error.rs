@@ -8,7 +8,8 @@ pub enum Error {
     Parsing(std::num::ParseIntError),
     NotFound,
     BadContent,
-    DiscordError
+    DiscordError,
+    String(StringError)
 }
 
 impl From<tokio_rusqlite::Error> for Error {
@@ -59,4 +60,27 @@ impl From<Error> for webdav_handler::fs::FsError {
     }
 }
 
+impl From<StringError> for Error {
+    fn from(value: StringError) -> Self {
+        Self::String(value)
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+pub struct StringError (String);
+
+impl<T: ToString> From<T> for StringError {
+    fn from(value: T) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<StringError> for webdav_handler::fs::FsError {
+    fn from(value: Error) -> Self {
+        webdav_handler::fs::FsError::GeneralFailure
+    }
+}
+
+pub type StringResult<T> = std::result::Result<T, StringError>;
