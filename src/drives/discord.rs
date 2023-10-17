@@ -1,12 +1,70 @@
-use std::{collections::HashMap, sync::Arc, borrow::Cow};
+use std::sync::{Weak, Arc};
+use std::{collections::HashMap, borrow::Cow};
 use futures::{FutureExt, AsyncWriteExt, AsyncReadExt, AsyncSeekExt};
 use reqwest::multipart;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, Mutex};
-use webdav_handler::fs::{DavMetaData, DavFileSystem, FsError, DavFile};
+use webdav_handler::fs::{DavMetaData, DavFileSystem, FsError, DavFile, DavDirEntry};
+use crate::db::DB;
 use crate::error::{Result, Error};
-use crate::types::{File, Metadata};
+use crate::types::{File, Metadata, DirEntry};
 use bytes::Buf;
+
+impl DB {
+    pub async fn get_discord_file_by_path(&self, path: String, client: Arc<DiscordClient>) -> Result<Option<DiscordFile>> {
+        Ok(self.conn.call(move |conn| {
+            conn.query_row("
+                SELECT id, parent_id, path, meta_len, meta_modified, meta_is_dir, discord_msg_id
+                FROM files
+                WHERE path = ?1
+            ", [path], |row| {
+                let file = File {
+                    dir_entry: DirEntry {
+                        id: row.get(0)?,
+                        parent_id: row.get(1)?,
+                        path: row.get(2)?,
+                        metadata: Metadata {
+                            len: row.get(3)?,
+                            modified: row.get(4).ok(),
+                            is_dir: row.get(5)?
+                        }
+                    },
+                    content: None,
+                    cursor_pos: 0
+                };
+                let msg_id = row.get::<_, Option<String>>(6)?;
+                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), client))
+            }).optional()
+        }).await?)
+    }
+    pub async fn get_discord_file_by_id(&self, id: usize, client: Arc<DiscordClient>) -> Result<Option<DiscordFile>> {
+        Ok(self.conn.call(move |conn| {
+            conn.query_row("
+                SELECT id, parent_id, path, meta_len, meta_modified, meta_is_dir, discord_msg_id
+                FROM files
+                WHERE id = ?1
+            ", [id], |row| {
+                let file = File {
+                    dir_entry: DirEntry {
+                        id: row.get(0)?,
+                        parent_id: row.get(1)?,
+                        path: row.get(2)?,
+                        metadata: Metadata {
+                            len: row.get(3)?,
+                            modified: row.get(4).ok(),
+                            is_dir: row.get(5)?
+                        }
+                    },
+                    content: None,
+                    cursor_pos: 0
+                };
+                let msg_id = row.get::<_, Option<String>>(6)?;
+                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), client))
+            }).optional()
+        }).await?)
+    }
+}
 
 #[derive(Clone, Debug)]
 struct DiscordCache (Arc<RwLock<HashMap<u64, Arc<RwLock<File>>>>>);
@@ -48,7 +106,7 @@ impl DiscordFile {
             return Ok(())
         }
         let cached = self.cached.read().await;
-        let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
+        let meta = cached.metadata().clone();
         drop(cached);
 
         let msg = self.client.get_message(self.msg_id.as_ref().ok_or(Error::NotFound)?).await?;
@@ -61,13 +119,13 @@ impl DiscordFile {
         }
 
         if !meta.is_dir() {
-            self.cached.write().await.metadata = Some(new_meta);
+            *self.cached.write().await.metadata_mut() = new_meta;
         } else {
             let url = &msg.attachments.get(0).ok_or(Error::NotFound)?.url;
             let content = self.client.get_attachment(url).await?;
             let mut cached = self.cached.write().await;
             cached.set_content(Some(content));
-            cached.metadata = Some(new_meta);
+            *cached.metadata_mut() = new_meta;
         }
 
         Ok(())
@@ -76,8 +134,8 @@ impl DiscordFile {
     pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Vec<u8>)>)> {
         let cached = self.cached.read().await;
         let content = cached.content.as_ref().ok_or(Error::NotFound)?.get_ref().to_owned();
-        let meta = cached.metadata.clone().ok_or(Error::NotFound)?;
-        let id = cached.id;
+        let meta = cached.metadata().clone();
+        let id = *cached.id();
         drop(cached);
 
         Ok((serde_json::to_string(&meta)?, [(id.to_string(), content)].to_vec()))
@@ -112,29 +170,26 @@ impl DiscordFile {
 impl DavFile for DiscordFile {
     fn metadata<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
         async {
-            match self.cached.read().await.metadata {
-                Some(m) => Ok(Box::new(m) as Box<(dyn DavMetaData + 'static)>),
-                None => Err(FsError::GeneralFailure)
-            }
+            Ok(self.cached.read().await.metadata().clone().boxed() as Box<(dyn DavMetaData + 'static)>)
         }.boxed()
     }
     fn write_bytes<'a>(&'a mut self, buf: bytes::Bytes) -> webdav_handler::fs::FsFuture<()> {
         async move {
             self.load().await?;
-            let loaded_lock = self.loaded.lock().await;
+            let _loaded_lock = self.loaded.lock().await;
             let mut cached = self.cached.write().await;
-            let content = cached.content.unwrap();
+            let content = cached.content.as_mut().unwrap();
             content.write_all(&buf[..]).await;
             self.send_edit().await?;
             Ok(())
         }.boxed()
     }
-    fn write_buf<'a>(&'a mut self, buf: Box<dyn bytes::Buf + Send>) -> webdav_handler::fs::FsFuture<()> {
+    fn write_buf<'a>(&'a mut self, mut buf: Box<dyn bytes::Buf + Send>) -> webdav_handler::fs::FsFuture<()> {
         async move {
             self.load().await?;
-            let loaded_lock = self.loaded.lock().await;
+            let _loaded_lock = self.loaded.lock().await;
             let mut cached = self.cached.write().await;
-            let content = cached.content.unwrap();
+            let content = cached.content.as_mut().unwrap();
             while buf.has_remaining() {
                 let chunk = buf.chunk();
                 let n = content.write(chunk).await?;
@@ -147,24 +202,27 @@ impl DavFile for DiscordFile {
     fn read_bytes<'a>(&'a mut self, count: usize) -> webdav_handler::fs::FsFuture<bytes::Bytes> {
         async move {
             self.load().await?;
-            let buf = Vec::with_capacity(count);
+            let _loaded_lock = self.loaded.lock().await;
+            let mut buf = Vec::with_capacity(count);
             buf.fill(0);
-            let content = self.cached.read().await.content.unwrap().read_exact(&mut buf);
+            self.cached.write().await.content.as_mut().unwrap().read_exact(&mut buf);
             Ok(buf.into())
         }.boxed()
     }
     fn seek<'a>(&'a mut self, pos: std::io::SeekFrom) -> webdav_handler::fs::FsFuture<u64> {
         async move {
             self.load().await?;
-            let content = self.cached.read().await.content.unwrap();
+            let _loaded_lock = self.loaded.lock().await;
+            let mut cached = self.cached.write().await;
+            let content = cached.content.as_mut().unwrap();
             let res = content.seek(pos).await?;
             Ok(res)
         }.boxed()
     }
     fn flush<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<()> {
         async move {
-            let cached = self.cached.read().await;
-            if let Some(c) = cached.content {
+            let mut cached = self.cached.write().await;
+            if let Some(c) = &mut cached.content {
                 c.flush().await?;
             }
             Ok(())
@@ -174,13 +232,74 @@ impl DavFile for DiscordFile {
 
 #[derive(Clone)]
 pub struct DiscordFs {
-    cache: DiscordCache
+    db: Arc<DB>,
+    client: Arc<DiscordClient>,
+    weak: Weak<Self>
+}
+impl DiscordFs {
+    pub fn new(db: Arc<DB>, token: String, channel_id: String) -> Arc<Self> {
+        let client = DiscordClient::new(token, channel_id);
+
+        Arc::new_cyclic(|me|{
+            Self {
+                db,
+                client: Arc::new(client),
+                weak: me.clone()
+            }
+        })
+    }
+    pub fn arc(&self) -> Arc<Self> {
+        self.weak.upgrade().unwrap()
+    }
 }
 impl DavFileSystem for DiscordFs {
     fn metadata<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
         async move {
+            let path = path.to_string();
+            let mut file = self.db.get_discord_file_by_path(path, self.client.clone()).await?.ok_or(FsError::NotFound)?;
+            Ok(file.metadata().await?)
+        }.boxed()
+    }
+    fn read_dir<'a>(
+            &'a self,
+            path: &'a webdav_handler::davpath::DavPath,
+            meta: webdav_handler::fs::ReadDirMeta,
+    ) -> webdav_handler::fs::FsFuture<webdav_handler::fs::FsStream<Box<dyn webdav_handler::fs::DavDirEntry>>> {
+        async move {
+            let path = path.to_string();
+            let dir = self.db.get_dir_entry_by_path(path).await?.ok_or(FsError::NotFound)?;
+            let entries: Vec<Box<dyn DavDirEntry>> = self.db.get_dir_entries_by_parent_id(dir.id).await?.into_iter().map(|e|Box::new(e) as Box<dyn DavDirEntry>).collect();
+            let stream = futures::stream::iter(entries);
+            Ok(Box::pin(stream) as webdav_handler::fs::FsStream<Box<dyn webdav_handler::fs::DavDirEntry>>)
+        }.boxed()
+    }
+    fn open<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath, options: webdav_handler::fs::OpenOptions) -> webdav_handler::fs::FsFuture<Box<dyn DavFile>> {
+        async move {
+            let mut file = self.db.get_file_by_path(path.to_string()).await?;
+            if file.is_some() && options.create_new {
+                return Err(FsError::Exists)
+            }
+            if file.is_none() {
+                if options.create_new || options.create {
+                    let p = path.as_pathbuf();
+                    let parent_path = p.parent().ok_or(FsError::NotFound)?.to_str().ok_or(FsError::Forbidden)?;
+                    let parent = if parent_path.is_empty() {
+                        None
+                    } else {
+                        Some(self.db.get_dir_entry_by_path(parent_path.to_owned()).await?.ok_or(FsError::NotFound)?)
+                    };
+                    self.db.insert_dir_entry(parent.map(|p|p.id), path.as_url_string(), Metadata { len: 0, modified: None, is_dir: false });
+                    return self.open(path, options).await
+                } else {
+                    return Err(FsError::NotFound)
+                }
+            }
+            let mut file = file.unwrap();
+            if options.append {
+                file.cursor_pos = file.metadata().len;
+            }
 
-            Ok()
+            Ok(Box::new(DiscordFile::new(None, Arc::new(RwLock::new(file)), self.client.clone())))
         }.boxed()
     }
 }
