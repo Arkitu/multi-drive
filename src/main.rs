@@ -3,8 +3,10 @@ mod db;
 mod error;
 mod types;
 
+use types::Metadata;
 use error::Result;
 use std::env;
+use std::sync::Arc;
 use actix_web::{web, App, HttpServer};
 use webdav_handler::actix::*;
 use webdav_handler::{fakels::FakeLs, localfs::LocalFs, DavConfig, DavHandler};
@@ -26,10 +28,18 @@ async fn main() -> Result<()> {
     let addr = "127.0.0.1:4918";
     let dir = "/tmp";
 
-    let d_client = drives::discord::DiscordClient::new(env::var("DISCORD_TOKEN")?, env::var("DISCORD_CHANNEL")?);
+    let db = Arc::new(db::DB::new(None).await);
+    db.create_tables().await;
+    db.insert_dir_entry(None, "/".to_string(), Metadata {
+        len: 0,
+        modified: None,
+        is_dir: true
+    }).await?;
+
+    let d_fs = drives::discord::DiscordFs::new(db, env::var("DISCORD_TOKEN")?, env::var("DISCORD_CHANNEL")?);
 
     let dav_server = DavHandler::builder()
-        .filesystem(LocalFs::new(dir, false, false, false))
+        .filesystem(Box::new(d_fs))
         .locksystem(FakeLs::new())
         .build_handler();
 

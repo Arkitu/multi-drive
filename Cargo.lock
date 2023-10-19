@@ -1095,6 +1095,7 @@ dependencies = [
  "futures",
  "http",
  "http-body",
+ "percent-encoding",
  "pin-project",
  "reqwest",
  "rusqlite",

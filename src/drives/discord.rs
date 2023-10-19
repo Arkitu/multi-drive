@@ -1,5 +1,7 @@
-use std::sync::{Weak, Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::{collections::HashMap, borrow::Cow};
+use futures::io::Cursor;
 use futures::{FutureExt, AsyncWriteExt, AsyncReadExt, AsyncSeekExt};
 use reqwest::multipart;
 use rusqlite::OptionalExtension;
@@ -16,7 +18,7 @@ impl DB {
         Ok(self.conn.call(move |conn| {
             conn.query_row("
                 SELECT id, parent_id, path, meta_len, meta_modified, meta_is_dir, discord_msg_id
-                FROM files
+                FROM dir_entries
                 WHERE path = ?1
             ", [path], |row| {
                 let file = File {
@@ -42,7 +44,7 @@ impl DB {
         Ok(self.conn.call(move |conn| {
             conn.query_row("
                 SELECT id, parent_id, path, meta_len, meta_modified, meta_is_dir, discord_msg_id
-                FROM files
+                FROM dir_entries
                 WHERE id = ?1
             ", [id], |row| {
                 let file = File {
@@ -101,7 +103,7 @@ impl DiscordFile {
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
-    pub async fn load(&self) -> Result<()> {
+    pub async fn load(&mut self) -> Result<()> {
         if let Err(_) = self.loaded.try_lock() {
             return Ok(())
         }
@@ -109,31 +111,45 @@ impl DiscordFile {
         let meta = cached.metadata().clone();
         drop(cached);
 
-        let msg = self.client.get_message(self.msg_id.as_ref().ok_or(Error::NotFound)?).await?;
+        match &self.msg_id {
+            Some(msg_id) => {
+                let msg = self.client.get_message(msg_id).await?;
 
-        let new_meta: Metadata = serde_json::from_str(&msg.content)?;
+                let new_meta: Metadata = serde_json::from_str(&msg.content)?;
 
-        if meta.is_dir() != new_meta.is_dir() {
-            eprintln!("Distant file is_dir value is different from local file is_dir value");
-            return Err(Error::BadContent)
+                if meta.is_dir() != new_meta.is_dir() {
+                    eprintln!("Distant file is_dir value is different from local file is_dir value");
+                    return Err(Error::BadContent)
+                }
+
+                if !meta.is_dir() {
+                    *self.cached.write().await.metadata_mut() = new_meta;
+                } else {
+                    let url = &msg.attachments.get(0).ok_or(Error::DiscordAttachmentNotFound)?.url;
+                    let content = self.client.get_attachment(url).await?;
+                    let mut cached = self.cached.write().await;
+                    cached.set_content(Some(content));
+                    *cached.metadata_mut() = new_meta;
+                }
+            },
+            None => {
+                let mut cached = self.cached.write().await;
+                if let None = cached.content {
+                    cached.content = Some(Cursor::new(Vec::new()));
+                }
+                drop(cached);
+                self.send_create().await?;
+            }
         }
 
-        if !meta.is_dir() {
-            *self.cached.write().await.metadata_mut() = new_meta;
-        } else {
-            let url = &msg.attachments.get(0).ok_or(Error::NotFound)?.url;
-            let content = self.client.get_attachment(url).await?;
-            let mut cached = self.cached.write().await;
-            cached.set_content(Some(content));
-            *cached.metadata_mut() = new_meta;
-        }
+        
 
         Ok(())
     }
     /// Generate the message to send to Discord from the local file
     pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Vec<u8>)>)> {
         let cached = self.cached.read().await;
-        let content = cached.content.as_ref().ok_or(Error::NotFound)?.get_ref().to_owned();
+        let content = cached.content.as_ref().ok_or(Error::FileContentIsNone)?.get_ref().to_owned();
         let meta = cached.metadata().clone();
         let id = *cached.id();
         drop(cached);
@@ -154,7 +170,7 @@ impl DiscordFile {
     pub async fn send_edit(&self) -> Result<()> {
         let msg_data = self.get_msg_data().await?;
 
-        self.client.edit_msg_with_attachments(self.msg_id.as_ref().ok_or(Error::NotFound)?, &msg_data.0, msg_data.1).await?;
+        self.client.edit_msg_with_attachments(self.msg_id.as_ref().ok_or(Error::DiscordMessageIdIsNone)?, &msg_data.0, msg_data.1).await?;
 
         Ok(())
     }
@@ -179,7 +195,7 @@ impl DavFile for DiscordFile {
             let _loaded_lock = self.loaded.lock().await;
             let mut cached = self.cached.write().await;
             let content = cached.content.as_mut().unwrap();
-            content.write_all(&buf[..]).await;
+            content.write_all(&buf[..]).await?;
             self.send_edit().await?;
             Ok(())
         }.boxed()
@@ -205,7 +221,7 @@ impl DavFile for DiscordFile {
             let _loaded_lock = self.loaded.lock().await;
             let mut buf = Vec::with_capacity(count);
             buf.fill(0);
-            self.cached.write().await.content.as_mut().unwrap().read_exact(&mut buf);
+            self.cached.write().await.content.as_mut().unwrap().read_exact(&mut buf).await?;
             Ok(buf.into())
         }.boxed()
     }
@@ -233,30 +249,27 @@ impl DavFile for DiscordFile {
 #[derive(Clone)]
 pub struct DiscordFs {
     db: Arc<DB>,
-    client: Arc<DiscordClient>,
-    weak: Weak<Self>
+    client: Arc<DiscordClient>
 }
 impl DiscordFs {
-    pub fn new(db: Arc<DB>, token: String, channel_id: String) -> Arc<Self> {
+    pub fn new(db: Arc<DB>, token: String, channel_id: String) -> Self {
         let client = DiscordClient::new(token, channel_id);
 
-        Arc::new_cyclic(|me|{
-            Self {
-                db,
-                client: Arc::new(client),
-                weak: me.clone()
-            }
-        })
-    }
-    pub fn arc(&self) -> Arc<Self> {
-        self.weak.upgrade().unwrap()
+        Self {
+            db,
+            client: Arc::new(client)
+        }
     }
 }
+
 impl DavFileSystem for DiscordFs {
     fn metadata<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
         async move {
-            let path = path.to_string();
-            let mut file = self.db.get_discord_file_by_path(path, self.client.clone()).await?.ok_or(FsError::NotFound)?;
+            let mut path = path.as_url_string();
+            dbg!(&path);
+            path = percent_encoding::percent_decode_str(&path).decode_utf8().map_err(|_|FsError::Forbidden)?.to_string();
+            println!("{}", path);
+            let mut file = self.db.get_discord_file_by_path(path, self.client.clone()).await?.unwrap();//.ok_or(FsError::NotFound)?;
             Ok(file.metadata().await?)
         }.boxed()
     }
@@ -266,8 +279,11 @@ impl DavFileSystem for DiscordFs {
             meta: webdav_handler::fs::ReadDirMeta,
     ) -> webdav_handler::fs::FsFuture<webdav_handler::fs::FsStream<Box<dyn webdav_handler::fs::DavDirEntry>>> {
         async move {
-            let path = path.to_string();
-            let dir = self.db.get_dir_entry_by_path(path).await?.ok_or(FsError::NotFound)?;
+            let mut path = path.as_url_string();
+            dbg!(&path);
+            path = percent_encoding::percent_decode_str(&path).decode_utf8().map_err(|_|FsError::Forbidden)?.to_string();
+            dbg!(&path);
+            let dir = self.db.get_dir_entry_by_path(path).await?.unwrap();//.ok_or(FsError::NotFound)?;
             let entries: Vec<Box<dyn DavDirEntry>> = self.db.get_dir_entries_by_parent_id(dir.id).await?.into_iter().map(|e|Box::new(e) as Box<dyn DavDirEntry>).collect();
             let stream = futures::stream::iter(entries);
             Ok(Box::pin(stream) as webdav_handler::fs::FsStream<Box<dyn webdav_handler::fs::DavDirEntry>>)
@@ -275,20 +291,24 @@ impl DavFileSystem for DiscordFs {
     }
     fn open<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath, options: webdav_handler::fs::OpenOptions) -> webdav_handler::fs::FsFuture<Box<dyn DavFile>> {
         async move {
-            let mut file = self.db.get_file_by_path(path.to_string()).await?;
+            let mut path = path.as_url_string();
+            dbg!(&path);
+            path = percent_encoding::percent_decode_str(&path).decode_utf8().map_err(|_|FsError::Forbidden)?.to_string();
+            dbg!(&path);
+            let file = self.db.get_file_by_path(path.to_string()).await?;
             if file.is_some() && options.create_new {
                 return Err(FsError::Exists)
             }
             if file.is_none() {
                 if options.create_new || options.create {
-                    let p = path.as_pathbuf();
-                    let parent_path = p.parent().ok_or(FsError::NotFound)?.to_str().ok_or(FsError::Forbidden)?;
+                    let p = PathBuf::from(path);
+                    let parent_path = p.parent().unwrap().to_str().ok_or(FsError::Forbidden)?;//.ok_or(FsError::NotFound)?.to_str().ok_or(FsError::Forbidden)?;
                     let parent = if parent_path.is_empty() {
                         None
                     } else {
-                        Some(self.db.get_dir_entry_by_path(parent_path.to_owned()).await?.ok_or(FsError::NotFound)?)
+                        Some(self.db.get_dir_entry_by_path(parent_path.to_owned()).await?.unwrap())//.ok_or(FsError::NotFound)?)
                     };
-                    self.db.insert_dir_entry(parent.map(|p|p.id), path.as_url_string(), Metadata { len: 0, modified: None, is_dir: false });
+                    self.db.insert_dir_entry(parent.map(|p|p.id), path.clone(), Metadata { len: 0, modified: None, is_dir: false }).await?;
                     return self.open(path, options).await
                 } else {
                     return Err(FsError::NotFound)

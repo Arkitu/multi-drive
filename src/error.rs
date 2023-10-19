@@ -9,25 +9,29 @@ pub enum Error {
     Env(std::env::VarError),
     Parsing(std::num::ParseIntError),
     NotFound,
+    DiscordAttachmentNotFound,
+    FileContentIsNone,
+    DiscordMessageIdIsNone,
     BadContent,
-    DiscordError,
-    String(StringError)
+    DiscordError
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-       match self {
-           Self::DB(e) => write!(f, "Database error: {}", e),
-           Self::Reqwest(e) => write!(f, "Reqwest error: {}", e),
-           Self::Io(e) => write!(f, "IO error: {}", e),
-           Self::Serde(e) => write!(f, "Serde error: {}", e),
-           Self::Env(e) => write!(f, "Env error: {}", e),
-           Self::Parsing(e) => write!(f, "Parsing error: {}", e),
-           Self::NotFound => write!(f, "Not found"),
-           Self::BadContent => write!(f, "Bad content"),
-           Self::DiscordError => write!(f, "Discord error"),
-           Self::String(e) => write!(f, "String error: {}", e.0)
-       }
+        match self {
+            Self::DB(e) => write!(f, "Database error: {}", e),
+            Self::Reqwest(e) => write!(f, "Reqwest error: {}", e),
+            Self::Io(e) => write!(f, "IO error: {}", e),
+            Self::Serde(e) => write!(f, "Serde error: {}", e),
+            Self::Env(e) => write!(f, "Env error: {}", e),
+            Self::Parsing(e) => write!(f, "Parsing error: {}", e),
+            Self::NotFound => write!(f, "Not found"),
+            Self::DiscordAttachmentNotFound => write!(f, "Discord attachment not found"),
+            Self::FileContentIsNone => write!(f, "File content is none"),
+            Self::DiscordMessageIdIsNone => write!(f, "Discord message id is none"),
+            Self::BadContent => write!(f, "Bad content"),
+            Self::DiscordError => write!(f, "Discord error")
+        }
     }
 }
 
@@ -75,33 +79,9 @@ impl From<std::num::ParseIntError> for Error {
 
 impl From<Error> for webdav_handler::fs::FsError {
     fn from(value: Error) -> Self {
+        dbg!(value);
         webdav_handler::fs::FsError::GeneralFailure
     }
 }
-
-impl From<StringError> for Error {
-    fn from(value: StringError) -> Self {
-        Self::String(value)
-    }
-}
-
-
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-#[derive(Debug)]
-pub struct StringError (String);
-
-impl<T: ToString> From<T> for StringError {
-    fn from(value: T) -> Self {
-        Self(value.to_string())
-    }
-}
-
-impl From<StringError> for webdav_handler::fs::FsError {
-    fn from(value: StringError) -> Self {
-        webdav_handler::fs::FsError::GeneralFailure
-    }
-}
-
-pub type StringResult<T> = std::result::Result<T, StringError>;
