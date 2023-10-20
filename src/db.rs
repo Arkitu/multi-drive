@@ -2,6 +2,7 @@ use rusqlite::{OptionalExtension, params};
 use tokio_rusqlite::Connection;
 use crate::{error::{Result, Error}, types::{Metadata, File, DirEntry}};
 
+#[derive(Debug)]
 pub struct DB {
     pub conn: Connection,
 }
@@ -25,7 +26,7 @@ impl DB {
                     meta_len INTEGER NOT NULL,
                     meta_modified TEXT,
                     meta_is_dir BOOLEAN NOT NULL,
-                    discord_msg_id TEXT
+                    discord_msg_id TEXT UNIQUE
                 )
             ", ())?;
 

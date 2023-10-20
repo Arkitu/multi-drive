@@ -28,7 +28,7 @@ async fn main() -> Result<()> {
     let addr = "127.0.0.1:4918";
     let dir = "/tmp";
 
-    let db = Arc::new(db::DB::new(None).await);
+    let db = Arc::new(db::DB::new(Some("test.db")).await);
     db.create_tables().await;
     db.insert_dir_entry(None, "/".to_string(), Metadata {
         len: 0,
