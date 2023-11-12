@@ -90,7 +90,7 @@ impl DB {
                 Some(de) => de,
                 None => return Ok(None)
             },
-            content: None,
+            cached: None,
             cursor_pos: 0
         }))
     }
@@ -100,7 +100,7 @@ impl DB {
                 Some(de) => de,
                 None => return Ok(None)
             },
-            content: None,
+            cached: None,
             cursor_pos: 0
         }))
     }

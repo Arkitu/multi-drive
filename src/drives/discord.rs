@@ -32,7 +32,7 @@ impl DB {
                             is_dir: row.get(5)?
                         }
                     },
-                    content: None,
+                    cached: None,
                     cursor_pos: 0
                 };
                 let msg_id = row.get::<_, Option<String>>(6)?;
@@ -58,7 +58,7 @@ impl DB {
                             is_dir: row.get(5)?
                         }
                     },
-                    content: None,
+                    cached: None,
                     cursor_pos: 0
                 };
                 let msg_id = row.get::<_, Option<String>>(6)?;
@@ -150,8 +150,8 @@ impl DiscordFile {
             },
             None => {
                 let mut cached = self.cached.write().await;
-                if let None = cached.content {
-                    cached.content = Some(Cursor::new(Vec::new()));
+                if let None = cached.cached {
+                    cached.cached = Some(Cursor::new(Vec::new()));
                 }
                 drop(cached);
                 self.send_create().await?;
@@ -165,7 +165,7 @@ impl DiscordFile {
     /// Generate the message to send to Discord from the local file
     pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Vec<u8>)>)> {
         let cached = self.cached.read().await;
-        let content = cached.content.as_ref().ok_or(Error::FileContentIsNone)?.get_ref().to_owned();
+        let content = cached.cached.as_ref().ok_or(Error::FileContentIsNone)?.get_ref().to_owned();
         let meta = cached.metadata().clone();
         let id = *cached.id();
         drop(cached);
@@ -212,7 +212,7 @@ impl DavFile for DiscordFile {
             self.load().await?;
             let _loaded_lock = self.loaded.try_lock();
             let mut cached = self.cached.write().await;
-            let content = cached.content.as_mut().unwrap();
+            let content = cached.cached.as_mut().unwrap();
             content.write_all(&buf[..]).await?;
             self.send_edit().await?;
             Ok(())
@@ -223,7 +223,7 @@ impl DavFile for DiscordFile {
             self.load().await?;
             let _loaded_lock = self.loaded.try_lock();
             let mut cached = self.cached.write().await;
-            let content = cached.content.as_mut().unwrap();
+            let content = cached.cached.as_mut().unwrap();
             while buf.has_remaining() {
                 let chunk = buf.chunk();
                 let n = content.write(chunk).await?;
@@ -239,7 +239,7 @@ impl DavFile for DiscordFile {
             let _loaded_lock = self.loaded.try_lock();
             let mut buf = Vec::with_capacity(count);
             buf.fill(0);
-            self.cached.write().await.content.as_mut().unwrap().read_exact(&mut buf).await?;
+            self.cached.write().await.cached.as_mut().unwrap().read_exact(&mut buf).await?;
             Ok(buf.into())
         }.boxed()
     }
@@ -248,7 +248,7 @@ impl DavFile for DiscordFile {
             self.load().await?;
             let _loaded_lock = self.loaded.try_lock();
             let mut cached = self.cached.write().await;
-            let content = cached.content.as_mut().unwrap();
+            let content = cached.cached.as_mut().unwrap();
             let res = content.seek(pos).await?;
             Ok(res)
         }.boxed()
@@ -256,7 +256,7 @@ impl DavFile for DiscordFile {
     fn flush<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<()> {
         async move {
             let mut cached = self.cached.write().await;
-            if let Some(c) = &mut cached.content {
+            if let Some(c) = &mut cached.cached {
                 c.flush().await?;
             }
             Ok(())

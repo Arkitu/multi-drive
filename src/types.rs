@@ -2,6 +2,7 @@ use std::{time::SystemTime, path::Path, os::unix::prelude::OsStrExt};
 use chrono::{DateTime, Utc};
 use futures::{io::Cursor, FutureExt};
 use serde::{Deserialize, Serialize};
+use tokio::fs;
 use webdav_handler::fs::{DavMetaData, FsError, DavDirEntry};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -35,28 +36,11 @@ impl DavMetaData for Metadata {
 pub struct File {
     pub dir_entry: DirEntry,
     /// Set this with the set_content method
-    pub content: Option<Cursor<Vec<u8>>>,
+    pub cached: Option<fs::File>,
     /// This is used to store the cursor position when content is not loaded. This is not accurate the rest of the time
     pub cursor_pos: u64
 }
 impl File {
-    pub fn set_content(&mut self, new: Option<Vec<u8>>) {
-        match new {
-            Some(n) => {
-                let pos = match &self.content {
-                    Some(o) => o.position(),
-                    None => self.cursor_pos
-                };
-                let mut cursor = Cursor::new(n);
-                cursor.set_position(self.cursor_pos);
-                self.content = Some(cursor);
-            }
-            None => if let Some(o) = &self.content {
-                self.cursor_pos = o.position();
-                self.content = None;
-            }
-        }
-    }
     pub fn metadata(&self) -> &Metadata {
         &self.dir_entry.metadata
     }
