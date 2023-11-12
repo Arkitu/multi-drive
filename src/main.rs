@@ -5,13 +5,15 @@ mod types;
 
 use types::Metadata;
 use error::Result;
-use std::env;
+use std::{env, fs};
 use std::sync::Arc;
 use actix_web::{web, App, HttpServer};
 use webdav_handler::actix::*;
-use webdav_handler::{fakels::FakeLs, localfs::LocalFs, DavConfig, DavHandler};
+use webdav_handler::{fakels::FakeLs, DavConfig, DavHandler};
 
 pub async fn dav_handler(req: DavRequest, davhandler: web::Data<DavHandler>) -> DavResponse {
+    dbg!(req.request.uri());
+    dbg!(req.request.headers());
     if let Some(prefix) = req.prefix() {
         let config = DavConfig::new().strip_prefix(prefix);
         davhandler.handle_with(config, req.request).await.into()
@@ -26,7 +28,11 @@ async fn main() -> Result<()> {
     dotenv::from_filename("config.env").unwrap();
 
     let addr = "127.0.0.1:4918";
-    let dir = "/tmp";
+    let cache = "./cache";
+
+    if fs::metadata(cache).is_err() {
+        fs::create_dir(cache)?;
+    }
 
     let db = Arc::new(db::DB::new(Some("test.db")).await);
     db.create_tables().await;
@@ -43,7 +49,7 @@ async fn main() -> Result<()> {
         .locksystem(FakeLs::new())
         .build_handler();
 
-    println!("actix-web example: listening on {} serving {}", addr, dir);
+    println!("actix-web example: listening on {}", addr);
 
     HttpServer::new(move || {
         App::new()

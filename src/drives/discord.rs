@@ -284,9 +284,8 @@ impl DavFileSystem for DiscordFs {
     fn metadata<'a>(&'a self, path: &'a webdav_handler::davpath::DavPath) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
         async move {
             let mut path = path.as_url_string();
-            dbg!(&path);
             path = percent_encoding::percent_decode_str(&path).decode_utf8().map_err(|_|FsError::Forbidden)?.to_string();
-            println!("{}", path);
+            println!("metadata on {}", path);
             let mut file = self.db.get_discord_file_by_path(path, Arc::new(self.clone())).await?.unwrap();//.ok_or(FsError::NotFound)?;
             Ok(file.metadata().await?)
         }.boxed()
@@ -298,9 +297,8 @@ impl DavFileSystem for DiscordFs {
     ) -> webdav_handler::fs::FsFuture<webdav_handler::fs::FsStream<Box<dyn webdav_handler::fs::DavDirEntry>>> {
         async move {
             let mut path = path.as_url_string();
-            dbg!(&path);
             path = percent_encoding::percent_decode_str(&path).decode_utf8().map_err(|_|FsError::Forbidden)?.to_string();
-            dbg!(&path);
+            println!("read_dir on {}", path);
             let dir = self.db.get_dir_entry_by_path(path).await?.unwrap();//.ok_or(FsError::NotFound)?;
             let entries: Vec<Box<dyn DavDirEntry>> = self.db.get_dir_entries_by_parent_id(dir.id).await?.into_iter().map(|e|Box::new(e) as Box<dyn DavDirEntry>).collect();
             let stream = futures::stream::iter(entries);
@@ -311,9 +309,9 @@ impl DavFileSystem for DiscordFs {
         async move {
             let original_path = path;
             let mut path = path.as_url_string();
-            dbg!(&path);
             path = percent_encoding::percent_decode_str(&path).decode_utf8().map_err(|_|FsError::Forbidden)?.to_string();
-            dbg!(&path);
+            println!("open on {}", path);
+            dbg!(options);
             let file = self.db.get_file_by_path(path.to_string()).await?;
             if file.is_some() && options.create_new {
                 return Err(FsError::Exists)
