@@ -96,7 +96,7 @@ impl DiscordCache {
 #[derive(Debug)]
 pub struct DiscordFile {
     pub msg_id: Option<String>,
-    pub cached: Arc<RwLock<File>>,
+    pub cached: webdav_handler::localfs:://Arc<RwLock<File>>,
     pub fs: Arc<DiscordFs>,
     /// Lock when you are sure that the file is loaded. This way the file is not loaded multiple time
     pub loaded: Arc<Mutex<()>>
