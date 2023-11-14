@@ -14,7 +14,7 @@ use crate::types::{File, Metadata, DirEntry};
 use bytes::Buf;
 
 impl DB {
-    pub async fn get_discord_file_by_path(&self, path: String, fs: Arc<DiscordFs>) -> Result<Option<DiscordFile>> {
+    pub async fn get_discord_file_by_path(&self, path: String, fs: Arc<DiscordFs>, cache: Arc<PathBuf>) -> Result<Option<DiscordFile>> {
         Ok(self.conn.call(move |conn| {
             conn.query_row("
                 SELECT id, parent_id, path, meta_len, meta_modified, meta_is_dir, discord_msg_id
@@ -36,11 +36,11 @@ impl DB {
                     cursor_pos: 0
                 };
                 let msg_id = row.get::<_, Option<String>>(6)?;
-                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), fs))
+                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), fs, cache))
             }).optional()
         }).await?)
     }
-    pub async fn get_discord_file_by_id(&self, id: usize, fs: Arc<DiscordFs>) -> Result<Option<DiscordFile>> {
+    pub async fn get_discord_file_by_id(&self, id: usize, fs: Arc<DiscordFs>, cache: Arc<PathBuf>) -> Result<Option<DiscordFile>> {
         Ok(self.conn.call(move |conn| {
             conn.query_row("
                 SELECT id, parent_id, path, meta_len, meta_modified, meta_is_dir, discord_msg_id
@@ -62,7 +62,7 @@ impl DB {
                     cursor_pos: 0
                 };
                 let msg_id = row.get::<_, Option<String>>(6)?;
-                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), fs))
+                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), fs, cache))
             }).optional()
         }).await?)
     }
@@ -82,17 +82,19 @@ impl DB {
 #[derive(Debug)]
 pub struct DiscordFile {
     pub msg_id: Option<String>,
-    pub cached: Arc<RwLock<File>>,
+    pub inner: Arc<RwLock<File>>,
     pub fs: Arc<DiscordFs>,
+    pub cache: Arc<PathBuf>,
     /// Lock when you are sure that the file is loaded. This way the file is not loaded multiple time
     pub loaded: Arc<Mutex<()>>
 }
 impl DiscordFile {
-    pub fn new(msg_id: Option<String>, cached: Arc<RwLock<File>>, fs: Arc<DiscordFs>) -> Self {
+    pub fn new(msg_id: Option<String>, cached: Arc<RwLock<File>>, fs: Arc<DiscordFs>, cache: Arc<PathBuf>) -> Self {
         Self {
             msg_id,
-            cached,
+            inner: cached,
             fs,
+            cache,
             loaded: Arc::new(Mutex::new(()))
         }
     }
@@ -109,9 +111,9 @@ impl DiscordFile {
         if let Err(_) = self.loaded.try_lock() {
             return Ok(())
         }
-        let cached = self.cached.read().await;
-        let meta = cached.metadata().clone();
-        drop(cached);
+        let inner = self.inner.read().await;
+        let meta = inner.metadata().clone();
+        drop(inner);
 
         match &self.msg_id {
             Some(msg_id) => {
@@ -125,21 +127,21 @@ impl DiscordFile {
                 }
 
                 if !meta.is_dir() {
-                    *self.cached.write().await.metadata_mut() = new_meta;
+                    *self.inner.write().await.metadata_mut() = new_meta;
                 } else {
                     let url = &msg.attachments.get(0).ok_or(Error::DiscordAttachmentNotFound)?.url;
                     let content = self.client().get_attachment(url).await?;
-                    let mut cached = self.cached.write().await;
+                    let mut cached = self.inner.write().await;
                     cached.set_content(Some(content));
                     *cached.metadata_mut() = new_meta;
                 }
             },
             None => {
-                let mut cached = self.cached.write().await;
-                if let None = cached.cached {
-                    cached.cached = Some(Cursor::new(Vec::new()));
+                let mut inner = self.inner.write().await;
+                if let None = inner.cached {
+                    inner.cached = Some(Cursor::new(Vec::new()));
                 }
-                drop(cached);
+                drop(inner);
                 self.send_create().await?;
             }
         }
@@ -150,7 +152,7 @@ impl DiscordFile {
     }
     /// Generate the message to send to Discord from the local file
     pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Vec<u8>)>)> {
-        let cached = self.cached.read().await;
+        let cached = self.inner.read().await;
         let content = cached.cached.as_ref().ok_or(Error::FileContentIsNone)?.get_ref().to_owned();
         let meta = cached.metadata().clone();
         let id = *cached.id();
@@ -166,7 +168,7 @@ impl DiscordFile {
 
         self.msg_id = Some(msg_id.clone());
 
-        self.db().edit_discord_file_msg_id_by_id(*self.cached.read().await.id(), msg_id).await?;
+        self.db().edit_discord_file_msg_id_by_id(*self.inner.read().await.id(), msg_id).await?;
 
         Ok(())
     }
@@ -190,14 +192,14 @@ impl DiscordFile {
 impl DavFile for DiscordFile {
     fn metadata<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
         async {
-            Ok(self.cached.read().await.metadata().clone().boxed() as Box<(dyn DavMetaData + 'static)>)
+            Ok(self.inner.read().await.metadata().clone().boxed() as Box<(dyn DavMetaData + 'static)>)
         }.boxed()
     }
     fn write_bytes<'a>(&'a mut self, buf: bytes::Bytes) -> webdav_handler::fs::FsFuture<()> {
         async move {
             self.load().await?;
             let _loaded_lock = self.loaded.try_lock();
-            let mut cached = self.cached.write().await;
+            let mut cached = self.inner.write().await;
             let content = cached.cached.as_mut().unwrap();
             content.write_all(&buf[..]).await?;
             self.send_edit().await?;
@@ -208,7 +210,7 @@ impl DavFile for DiscordFile {
         async move {
             self.load().await?;
             let _loaded_lock = self.loaded.try_lock();
-            let mut cached = self.cached.write().await;
+            let mut cached = self.inner.write().await;
             let content = cached.cached.as_mut().unwrap();
             while buf.has_remaining() {
                 let chunk = buf.chunk();
@@ -225,7 +227,7 @@ impl DavFile for DiscordFile {
             let _loaded_lock = self.loaded.try_lock();
             let mut buf = Vec::with_capacity(count);
             buf.fill(0);
-            self.cached.write().await.cached.as_mut().unwrap().read_exact(&mut buf).await?;
+            self.inner.write().await.cached.as_mut().unwrap().read_exact(&mut buf).await?;
             Ok(buf.into())
         }.boxed()
     }
@@ -233,7 +235,7 @@ impl DavFile for DiscordFile {
         async move {
             self.load().await?;
             let _loaded_lock = self.loaded.try_lock();
-            let mut cached = self.cached.write().await;
+            let mut cached = self.inner.write().await;
             let content = cached.cached.as_mut().unwrap();
             let res = content.seek(pos).await?;
             Ok(res)
@@ -241,7 +243,7 @@ impl DavFile for DiscordFile {
     }
     fn flush<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<()> {
         async move {
-            let mut cached = self.cached.write().await;
+            let mut cached = self.inner.write().await;
             if let Some(c) = &mut cached.cached {
                 c.flush().await?;
             }
@@ -298,7 +300,7 @@ impl DavFileSystem for DiscordFs {
             path = percent_encoding::percent_decode_str(&path).decode_utf8().map_err(|_|FsError::Forbidden)?.to_string();
             println!("open on {}", path);
             dbg!(options);
-            let file = self.db.get_file_by_path(path.to_string()).await?;
+            let file = self.db.get_discord_file_by_path(path.to_string(), Arc::new(self.clone())).await?;
             if file.is_some() && options.create_new {
                 return Err(FsError::Exists)
             }
