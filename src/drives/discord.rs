@@ -78,25 +78,11 @@ impl DB {
     }
 }
 
-#[derive(Clone, Debug)]
-struct DiscordCache (Arc<RwLock<HashMap<u64, Arc<RwLock<File>>>>>);
-impl DiscordCache {
-    pub fn new() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())))
-    }
-    pub async fn get(&self, discord_id: &u64) -> Option<Arc<RwLock<File>>> {
-        if let Some(f) = self.0.read().await.get(discord_id) {
-            Some(f.clone())
-        } else {
-            None
-        }
-    }
-}
 
 #[derive(Debug)]
 pub struct DiscordFile {
     pub msg_id: Option<String>,
-    pub cached: webdav_handler::localfs:://Arc<RwLock<File>>,
+    pub cached: Arc<RwLock<File>>,
     pub fs: Arc<DiscordFs>,
     /// Lock when you are sure that the file is loaded. This way the file is not loaded multiple time
     pub loaded: Arc<Mutex<()>>

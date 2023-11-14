@@ -24,3 +24,5 @@ serde_json = "1.0.107"
 serde = { version = "1.0.188", features = ["derive"] }
 percent-encoding = "2.3.0"
 log = "0.4.20"
+pin-utils = "0.1.0"
+libc = "0.2.150"
