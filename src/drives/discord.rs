@@ -1,11 +1,12 @@
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::sync::Arc;
 use std::{collections::HashMap, borrow::Cow};
 use futures::io::Cursor;
-use futures::{FutureExt, AsyncWriteExt, AsyncReadExt, AsyncSeekExt};
+use futures::{FutureExt, AsyncReadExt, AsyncSeekExt};
 use reqwest::multipart;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, Mutex};
 use webdav_handler::fs::{DavMetaData, DavFileSystem, FsError, DavFile, DavDirEntry};
 use crate::db::DB;
@@ -36,7 +37,7 @@ impl DB {
                     cursor_pos: 0
                 };
                 let msg_id = row.get::<_, Option<String>>(6)?;
-                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), fs, cache))
+                Ok(DiscordFile::new(msg_id, file, fs, cache))
             }).optional()
         }).await?)
     }
@@ -62,7 +63,7 @@ impl DB {
                     cursor_pos: 0
                 };
                 let msg_id = row.get::<_, Option<String>>(6)?;
-                Ok(DiscordFile::new(msg_id, Arc::new(RwLock::new(file)), fs, cache))
+                Ok(DiscordFile::new(msg_id, file, fs, cache))
             }).optional()
         }).await?)
     }
@@ -82,20 +83,17 @@ impl DB {
 #[derive(Debug)]
 pub struct DiscordFile {
     pub msg_id: Option<String>,
-    pub inner: Arc<RwLock<File>>,
+    pub inner: File,
     pub fs: Arc<DiscordFs>,
-    pub cache: Arc<PathBuf>,
-    /// Lock when you are sure that the file is loaded. This way the file is not loaded multiple time
-    pub loaded: Arc<Mutex<()>>
+    pub cache: Arc<PathBuf>
 }
 impl DiscordFile {
-    pub fn new(msg_id: Option<String>, cached: Arc<RwLock<File>>, fs: Arc<DiscordFs>, cache: Arc<PathBuf>) -> Self {
+    pub fn new(msg_id: Option<String>, inner: File, fs: Arc<DiscordFs>, cache: Arc<PathBuf>) -> Self {
         Self {
             msg_id,
-            inner: cached,
+            inner,
             fs,
-            cache,
-            loaded: Arc::new(Mutex::new(()))
+            cache
         }
     }
     pub fn client(&self) -> &Arc<DiscordClient> {
@@ -107,13 +105,14 @@ impl DiscordFile {
     pub fn boxed(self) -> Box<Self> {
         Box::new(self)
     }
+    pub fn path(&self) -> String {
+        format!("./cache/{}", self.inner.id())
+    }
     pub async fn load(&mut self) -> Result<()> {
-        if let Err(_) = self.loaded.try_lock() {
+        let path = self.path();
+        if tokio::fs::try_exists(&path).await? {
             return Ok(())
         }
-        let inner = self.inner.read().await;
-        let meta = inner.metadata().clone();
-        drop(inner);
 
         match &self.msg_id {
             Some(msg_id) => {
@@ -121,44 +120,40 @@ impl DiscordFile {
 
                 let new_meta: Metadata = serde_json::from_str(&msg.content)?;
 
-                if meta.is_dir() != new_meta.is_dir() {
+                if self.inner.metadata().is_dir() != new_meta.is_dir() {
                     eprintln!("Distant file is_dir value is different from local file is_dir value");
                     return Err(Error::BadContent)
                 }
 
-                if !meta.is_dir() {
-                    *self.inner.write().await.metadata_mut() = new_meta;
-                } else {
+                if !self.inner.metadata().is_dir() {
                     let url = &msg.attachments.get(0).ok_or(Error::DiscordAttachmentNotFound)?.url;
                     let content = self.client().get_attachment(url).await?;
-                    let mut cached = self.inner.write().await;
-                    cached.set_content(Some(content));
-                    *cached.metadata_mut() = new_meta;
+                    tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path).await?
+                        .write_all(&content).await?;
                 }
+                *self.inner.metadata_mut() = new_meta;
             },
             None => {
-                let mut inner = self.inner.write().await;
-                if let None = inner.cached {
-                    inner.cached = Some(Cursor::new(Vec::new()));
-                }
-                drop(inner);
                 self.send_create().await?;
             }
         }
-
-        
 
         Ok(())
     }
     /// Generate the message to send to Discord from the local file
     pub async fn get_msg_data(&self) -> Result<(String, Vec<(String, Vec<u8>)>)> {
-        let cached = self.inner.read().await;
-        let content = cached.cached.as_ref().ok_or(Error::FileContentIsNone)?.get_ref().to_owned();
-        let meta = cached.metadata().clone();
-        let id = *cached.id();
-        drop(cached);
+        let mut attachments = Vec::new();
+        if !self.inner.metadata().is_dir() {
+            if !tokio::fs::try_exists(self.path()).await? {
+                return Err(Error::NotFound)
+            }
+            attachments.push((self.inner.id().to_string(), tokio::fs::read(self.path()).await?))
+        }
 
-        Ok((serde_json::to_string(&meta)?, [(id.to_string(), content)].to_vec()))
+        Ok((serde_json::to_string(self.inner.metadata())?, attachments))
     }
     /// Send the file to Discord for the first time
     pub async fn send_create(&mut self) -> Result<()> {
@@ -168,7 +163,7 @@ impl DiscordFile {
 
         self.msg_id = Some(msg_id.clone());
 
-        self.db().edit_discord_file_msg_id_by_id(*self.inner.read().await.id(), msg_id).await?;
+        self.db().edit_discord_file_msg_id_by_id(*self.inner.id(), msg_id).await?;
 
         Ok(())
     }
@@ -192,13 +187,13 @@ impl DiscordFile {
 impl DavFile for DiscordFile {
     fn metadata<'a>(&'a mut self) -> webdav_handler::fs::FsFuture<Box<dyn DavMetaData>> {
         async {
-            Ok(self.inner.read().await.metadata().clone().boxed() as Box<(dyn DavMetaData + 'static)>)
+            Ok(self.inner.metadata().clone().boxed() as Box<(dyn DavMetaData + 'static)>)
         }.boxed()
     }
     fn write_bytes<'a>(&'a mut self, buf: bytes::Bytes) -> webdav_handler::fs::FsFuture<()> {
         async move {
             self.load().await?;
-            let _loaded_lock = self.loaded.try_lock();
+            self.inner.
             let mut cached = self.inner.write().await;
             let content = cached.cached.as_mut().unwrap();
             content.write_all(&buf[..]).await?;
